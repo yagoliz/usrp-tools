@@ -105,7 +105,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         try {
             set_usrp_clock_gpsdo(usrp);
             set_usrp_time_gpsdo(usrp, gps_timeout);
-        } catch (const std::exception& e) {
+        } catch (const std::exception &e) {
             std::cerr << e.what() << std::endl;
             return -1;
         }
