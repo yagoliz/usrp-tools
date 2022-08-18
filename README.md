@@ -24,8 +24,8 @@ On the root directory run:
 meson setup build
 ```
 
-Then change to the `build` directory and run:
+Then navigate to the `build` directory and run:
 ```bash
-meson compile
+cd build && meson compile
 ```
 and that should do the trick!
