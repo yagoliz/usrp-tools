@@ -194,6 +194,7 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
     rx_stream->issue_stream_cmd(stream_cmd);
 
+    std::cout << boost::format("Stream finished. Saving data to %s...") % file << std::endl;
     if (outfile.is_open()) {
         if (use_binary and binfmt == "raw") {
             outfile.close();
@@ -470,9 +471,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
             else if (binfmt == "msgpack")
                 file = str(boost::format("measurement_%i.msgpack") % time);
             else {
-                std::cerr << str(boost::format("Error. Unsupported binary file format. Only "
-                                               "raw|msgpack are allowed; You requested: %s") %
-                                 binfmt)
+                std::cerr << boost::format("Error. Unsupported binary file format. Only "
+                                           "raw|msgpack are allowed; You requested: %s") %
+                                 binfmt
                           << std::endl;
                 return EXIT_FAILURE;
             }

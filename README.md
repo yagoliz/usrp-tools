@@ -21,11 +21,11 @@ sudo apt install meson build-essential libboost-dev libboost-program-options-dev
 ### Compiling
 On the root directory run:
 ```bash
-meson setup build
+meson setup builddir
 ```
 
 Then navigate to the `build` directory and run:
 ```bash
-cd build && meson compile
+cd builddir && meson compile
 ```
 and that should do the trick!
