@@ -43,6 +43,7 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
                   size_t samps_per_buff, 
                   uint64_t num_requested_samples,
                   bool use_binary,
+                  const std::string &binfmt,
                   double time_requested = 0.0, 
                   bool bw_summary = false, 
                   bool stats = false,
@@ -67,13 +68,17 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
     uhd::rx_metadata_t md;
     const uint64_t bw = static_cast<uint64_t>(usrp->get_rx_rate());
     const uint64_t num_buffs = (num_requested_samples == 0)
-                                             ? 60 * bw / samps_per_buff
-                                             : num_requested_samples / samps_per_buff;
+                                   ? 60 * bw / samps_per_buff
+                                   : num_requested_samples / samps_per_buff;
     std::vector<samp_type> buff(samps_per_buff);
-    std::vector<std::vector<samp_type>> buffs; buffs.reserve(num_buffs);
-    std::vector<uint64_t> full_sec_buff; full_sec_buff.reserve(num_buffs);
-    std::vector<double> frac_sec_buff; frac_sec_buff.reserve(num_buffs);
-    std::vector<size_t> rx_samps_buff; rx_samps_buff.reserve(num_buffs);
+    std::vector<std::vector<samp_type>> buffs;
+    buffs.reserve(num_buffs);
+    std::vector<uint64_t> full_sec_buff;
+    full_sec_buff.reserve(num_buffs);
+    std::vector<double> frac_sec_buff;
+    frac_sec_buff.reserve(num_buffs);
+    std::vector<size_t> rx_samps_buff;
+    rx_samps_buff.reserve(num_buffs);
     std::ofstream outfile;
     if (not null) {
         if (use_binary)
@@ -100,10 +105,8 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
     auto last_update = start_time;
     uint64_t last_update_samps = 0;
 
-    // Run this loop until either time expired (if a duration was given), until
-    // the requested number of samples were collected (if such a number was
-    // given), or until Ctrl-C was pressed.
-    if (!use_binary) {
+    // insert the metadata of rx stream
+    if (!use_binary || binfmt == "msgpack") {
         const auto time = std::time(nullptr);
         std::asctime(std::localtime(&time));
         data["start_time"] = time;
@@ -112,6 +115,9 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
         data["bandwidth"] = usrp->get_rx_rate();
     }
 
+    // Run this loop until either time expired (if a duration was given), until
+    // the requested number of samples were collected (if such a number was
+    // given), or until Ctrl-C was pressed.
     while (not stop_signal_called and
            (num_requested_samples != num_total_samps or num_requested_samples == 0) and
            (time_requested == 0.0 or std::chrono::steady_clock::now() <= stop_time)) {
@@ -159,7 +165,7 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
         num_total_samps += num_rx_samps;
 
         if (outfile.is_open()) {
-            if (use_binary) {
+            if (use_binary and binfmt == "raw") {
                 outfile.write((const char *)&buff.front(), num_rx_samps * sizeof(samp_type));
             } else {
                 // create our object
@@ -189,7 +195,7 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
     rx_stream->issue_stream_cmd(stream_cmd);
 
     if (outfile.is_open()) {
-        if (use_binary) {
+        if (use_binary and binfmt == "raw") {
             outfile.close();
         } else {
             // emplace all data on our json stream
@@ -203,7 +209,14 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
                 data["data"].emplace_back(chunk);
             }
 
-            outfile << data << std::endl;
+            if (!use_binary)
+                outfile << data << std::endl;
+            else if (binfmt == "msgpack") {
+                std::vector<uint8_t> message = json::to_msgpack(data);
+                outfile.write((const char *)&message.front(), message.size() * sizeof(uint8_t));
+            } else {
+                std::cerr << "What???" << std::endl;
+            }
             outfile.close();
         }
     }
@@ -270,7 +283,7 @@ bool check_locked_sensor(std::vector<std::string> sensor_names, const char *sens
 
 int UHD_SAFE_MAIN(int argc, char *argv[]) {
     // variables to be set by po
-    std::string args, file, file_ts, type, ant, subdev, ref, wirefmt;
+    std::string args, file, file_ts, type, ant, subdev, ref, wirefmt, binfmt;
     size_t channel, total_num_samps, spb, gps_timeout;
     double rate, freq, gain, bw, total_time, setup_time, lo_offset;
     bool use_binary;
@@ -299,7 +312,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         ("wirefmt", po::value<std::string>(&wirefmt)->default_value("sc16"), "Wire format (sc8 or sc16)")
         ("setup", po::value<double>(&setup_time)->default_value(1.0), "Seconds of setup time")
         ("timeout-gps", po::value<size_t>(&gps_timeout)->default_value(300), "Timeout to wait for GPSDO lock")
-        ("use-binary", "Save data in binary format (only raw IQ)")
+        ("use-binary", "Save data in binary format")
+        ("binary-format", po::value<std::string>(&binfmt)->default_value("msgpack"), "Which format to save to (msgpack, raw IQ)")
         ("progress", "Periodically display short-term bandwidth")
         ("stats", "Show average bandwidth on exit")
         ("sizemap", "Track packet size and display breakdown on exit")
@@ -451,7 +465,17 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
     std::asctime(std::localtime(&time));
     if (file == "") {
         if (use_binary)
-            file = str(boost::format("measurement_%i.raw") % time);
+            if (binfmt == "raw")
+                file = str(boost::format("measurement_%i.raw") % time);
+            else if (binfmt == "msgpack")
+                file = str(boost::format("measurement_%i.msgpack") % time);
+            else {
+                std::cerr << str(boost::format("Error. Unsupported binary file format. Only "
+                                               "raw|msgpack are allowed; You requested: %s") %
+                                 binfmt)
+                          << std::endl;
+                return EXIT_FAILURE;
+            }
         else
             file = str(boost::format("measurement_%i.json") % time);
     }
@@ -480,6 +504,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
                                    spb,                    \
                                    total_num_samps,        \
                                    use_binary,             \
+                                   binfmt,                 \
                                    total_time,             \
                                    bw_summary,             \
                                    stats,                  \
