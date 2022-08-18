@@ -6,7 +6,20 @@
 #include <iostream>
 
 #include <boost/format.hpp>
+#include <nlohmann/json.hpp>
 #include <uhd/usrp/multi_usrp.hpp>
+
+// Defining json ser/des for std::complex
+using json = nlohmann::json;
+namespace std {
+
+template <class T> void to_json(json &j, const std::complex<T> &p) { j = json{p.real(), p.imag()}; }
+
+template <class T> void from_json(const json &j, std::complex<T> &p) {
+    p.real(j.at(0));
+    p.imag(j.at(1));
+}
+} // namespace std
 
 // Setting of the USRP to the GPSDO source
 void set_usrp_clock_gpsdo(uhd::usrp::multi_usrp::sptr usrp) {

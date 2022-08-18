@@ -9,6 +9,7 @@
 #include <chrono>
 #include <complex>
 #include <csignal>
+#include <ctime>
 #include <fstream>
 #include <iostream>
 #include <thread>
@@ -16,6 +17,7 @@
 #include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/program_options.hpp>
+#include <nlohmann/json.hpp>
 #include <uhd/exception.hpp>
 #include <uhd/types/tune_request.hpp>
 #include <uhd/usrp/multi_usrp.hpp>
@@ -24,19 +26,37 @@
 
 #include "utils.hh"
 
+// library shortcuts
 namespace po = boost::program_options;
+using json = nlohmann::json;
 
 static bool stop_signal_called = false;
 void sig_int_handler(int) { stop_signal_called = true; }
 
 template <typename samp_type>
-void recv_to_file(uhd::usrp::multi_usrp::sptr usrp, const std::string &cpu_format,
-                  const std::string &wire_format, const size_t &channel, const std::string &file,
-                  size_t samps_per_buff, unsigned long long num_requested_samples,
-                  double time_requested = 0.0, bool bw_summary = false, bool stats = false,
-                  bool null = false, bool enable_size_map = false, bool throw_on_overflow = true,
-                  bool continue_on_bad_packet = false) {
-    unsigned long long num_total_samps = 0;
+// clang-format off
+void recv_to_file(uhd::usrp::multi_usrp::sptr usrp, 
+                  const std::string &cpu_format,
+                  const std::string &wire_format, 
+                  const size_t &channel, 
+                  const std::string &file,
+                  size_t samps_per_buff, 
+                  uint64_t num_requested_samples,
+                  bool use_binary,
+                  double time_requested = 0.0, 
+                  bool bw_summary = false, 
+                  bool stats = false,
+                  bool null = false, 
+                  bool enable_size_map = false, 
+                  bool throw_on_overflow = true,
+                  bool continue_on_bad_packet = false)
+// clang-format on
+{
+    // json data
+    json data;
+
+    // setting up the streamerd
+    uint64_t num_total_samps = 0;
     // create a receive streamer
     uhd::stream_args_t stream_args(cpu_format, wire_format);
     std::vector<size_t> channel_nums;
@@ -45,10 +65,22 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp, const std::string &cpu_forma
     uhd::rx_streamer::sptr rx_stream = usrp->get_rx_stream(stream_args);
 
     uhd::rx_metadata_t md;
+    const uint64_t bw = static_cast<uint64_t>(usrp->get_rx_rate());
+    const uint64_t num_buffs = (num_requested_samples == 0)
+                                             ? 60 * bw / samps_per_buff
+                                             : num_requested_samples / samps_per_buff;
     std::vector<samp_type> buff(samps_per_buff);
+    std::vector<std::vector<samp_type>> buffs; buffs.reserve(num_buffs);
+    std::vector<uint64_t> full_sec_buff; full_sec_buff.reserve(num_buffs);
+    std::vector<double> frac_sec_buff; frac_sec_buff.reserve(num_buffs);
+    std::vector<size_t> rx_samps_buff; rx_samps_buff.reserve(num_buffs);
     std::ofstream outfile;
-    if (not null)
-        outfile.open(file.c_str(), std::ofstream::binary);
+    if (not null) {
+        if (use_binary)
+            outfile.open(file.c_str(), std::ofstream::binary);
+        else
+            outfile.open(file.c_str());
+    }
     bool overflow_message = true;
 
     // setup streaming
@@ -66,16 +98,25 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp, const std::string &cpu_forma
     const auto stop_time = start_time + std::chrono::milliseconds(int64_t(1000 * time_requested));
     // Track time and samps between updating the BW summary
     auto last_update = start_time;
-    unsigned long long last_update_samps = 0;
+    uint64_t last_update_samps = 0;
 
     // Run this loop until either time expired (if a duration was given), until
     // the requested number of samples were collected (if such a number was
     // given), or until Ctrl-C was pressed.
+    if (!use_binary) {
+        const auto time = std::time(nullptr);
+        std::asctime(std::localtime(&time));
+        data["start_time"] = time;
+        data["center_freq"] = usrp->get_rx_freq();
+        data["gain"] = usrp->get_rx_gain();
+        data["bandwidth"] = usrp->get_rx_rate();
+    }
+
     while (not stop_signal_called and
            (num_requested_samples != num_total_samps or num_requested_samples == 0) and
            (time_requested == 0.0 or std::chrono::steady_clock::now() <= stop_time)) {
         const auto now = std::chrono::steady_clock::now();
-
+        json chunk;
         size_t num_rx_samps = rx_stream->recv(&buff.front(), buff.size(), md, 3.0, enable_size_map);
 
         if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
@@ -91,7 +132,6 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp, const std::string &cpu_forma
                                            "%fMB/s.\n"
                                            "  Dropped samples will not be written to the "
                                            "file.\n"
-                                           "  Please modify this example for your purposes.\n"
                                            "  This message will not appear again.\n") %
                                  (usrp->get_rx_rate(channel) * sizeof(samp_type) / 1e6);
 
@@ -119,7 +159,15 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp, const std::string &cpu_forma
         num_total_samps += num_rx_samps;
 
         if (outfile.is_open()) {
-            outfile.write((const char *)&buff.front(), num_rx_samps * sizeof(samp_type));
+            if (use_binary) {
+                outfile.write((const char *)&buff.front(), num_rx_samps * sizeof(samp_type));
+            } else {
+                // create our object
+                rx_samps_buff.emplace_back(num_rx_samps);
+                full_sec_buff.emplace_back(md.time_spec.get_full_secs());
+                frac_sec_buff.emplace_back(md.time_spec.get_frac_secs());
+                buffs.emplace_back(buff);
+            }
         }
 
         if (bw_summary) {
@@ -141,7 +189,23 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp, const std::string &cpu_forma
     rx_stream->issue_stream_cmd(stream_cmd);
 
     if (outfile.is_open()) {
-        outfile.close();
+        if (use_binary) {
+            outfile.close();
+        } else {
+            // emplace all data on our json stream
+            for (int i = 0; i < rx_samps_buff.size(); i++) {
+                json chunk;
+                chunk["seconds"] = full_sec_buff[i];
+                chunk["nanoseconds"] = frac_sec_buff[i];
+                chunk["size"] = rx_samps_buff[i];
+                chunk["samples"] = buffs[i];
+
+                data["data"].emplace_back(chunk);
+            }
+
+            outfile << data << std::endl;
+            outfile.close();
+        }
     }
 
     if (stats) {
@@ -206,41 +270,43 @@ bool check_locked_sensor(std::vector<std::string> sensor_names, const char *sens
 
 int UHD_SAFE_MAIN(int argc, char *argv[]) {
     // variables to be set by po
-    std::string args, file, type, ant, subdev, ref, wirefmt;
+    std::string args, file, file_ts, type, ant, subdev, ref, wirefmt;
     size_t channel, total_num_samps, spb, gps_timeout;
     double rate, freq, gain, bw, total_time, setup_time, lo_offset;
+    bool use_binary;
 
     // setup the program options
     po::options_description desc("Allowed options");
+
     // clang-format off
     desc.add_options()
-        ("help", "help message")
-        ("args", po::value<std::string>(&args)->default_value(""), "multi uhd device address args")
-        ("file", po::value<std::string>(&file)->default_value("usrp_samples.dat"), "name of the file to write binary samples to")
-        ("type", po::value<std::string>(&type)->default_value("short"), "sample type: double, float, or short")
-        ("nsamps", po::value<size_t>(&total_num_samps)->default_value(0), "total number of samples to receive")
-        ("duration", po::value<double>(&total_time)->default_value(0), "total number of seconds to receive")
-        ("spb", po::value<size_t>(&spb)->default_value(10000), "samples per buffer")
-        ("rate", po::value<double>(&rate)->default_value(1e6), "rate of incoming samples")
-        ("freq", po::value<double>(&freq)->default_value(0.0), "RF center frequency in Hz")
-        ("lo-offset", po::value<double>(&lo_offset)->default_value(0.0),
-            "Offset for frontend LO in Hz (optional)")
-        ("gain", po::value<double>(&gain), "gain for the RF chain")
-        ("ant", po::value<std::string>(&ant), "antenna selection")
-        ("subdev", po::value<std::string>(&subdev), "subdevice specification")
-        ("channel", po::value<size_t>(&channel)->default_value(0), "which channel to use")
-        ("bw", po::value<double>(&bw), "analog frontend filter bandwidth in Hz")
-        ("ref", po::value<std::string>(&ref)->default_value("gpsdo"), "reference source (internal, external, mimo, gpsdo)")
-        ("wirefmt", po::value<std::string>(&wirefmt)->default_value("sc16"), "wire format (sc8, sc16 or s16)")
-        ("setup", po::value<double>(&setup_time)->default_value(1.0), "seconds of setup time")
-        ("timeout-gps", po::value<size_t>(&gps_timeout)->default_value(300), "timeout to wait for GPSDO lock")
-        ("progress", "periodically display short-term bandwidth")
-        ("stats", "show average bandwidth on exit")
-        ("sizemap", "track packet size and display breakdown on exit")
-        ("null", "run without writing to file")
-        ("continue", "don't abort on a bad packet")
-        ("skip-lo", "skip checking LO lock status")
-        ("int-n", "tune USRP with integer-N tuning")
+        ("help,h", "Show this help message")
+        ("args", po::value<std::string>(&args)->default_value(""), "Multi uhd device address args")
+        ("file", po::value<std::string>(&file)->default_value(""), "Name of the file to write binary samples to")
+        ("type,t", po::value<std::string>(&type)->default_value("float"), "Sample type: double, float, or short")
+        ("nsamps,n", po::value<size_t>(&total_num_samps)->default_value(0), "Total number of samples to receive")
+        ("duration,d", po::value<double>(&total_time)->default_value(0), "Total number of seconds to receive")
+        ("spb,s", po::value<size_t>(&spb)->default_value(2000), "Samples per buffer")
+        ("rate,r", po::value<double>(&rate)->default_value(1e6), "Rate of incoming samples")
+        ("freq,f", po::value<double>(&freq), "RF center frequency in Hz")
+        ("lo-offset", po::value<double>(&lo_offset)->default_value(0.0), "Offset for frontend LO in Hz (optional)")
+        ("gain,g", po::value<double>(&gain), "Gain for the RF chain")
+        ("ant", po::value<std::string>(&ant), "Antenna selection")
+        ("subdev", po::value<std::string>(&subdev), "Subdevice specification")
+        ("channel", po::value<size_t>(&channel)->default_value(0), "Which channel to use")
+        ("bw", po::value<double>(&bw), "Analog frontend filter bandwidth in Hz")
+        ("ref", po::value<std::string>(&ref)->default_value("gpsdo"), "Reference source (internal, external, mimo, gpsdo)")
+        ("wirefmt", po::value<std::string>(&wirefmt)->default_value("sc16"), "Wire format (sc8 or sc16)")
+        ("setup", po::value<double>(&setup_time)->default_value(1.0), "Seconds of setup time")
+        ("timeout-gps", po::value<size_t>(&gps_timeout)->default_value(300), "Timeout to wait for GPSDO lock")
+        ("use-binary", "Save data in binary format (only raw IQ)")
+        ("progress", "Periodically display short-term bandwidth")
+        ("stats", "Show average bandwidth on exit")
+        ("sizemap", "Track packet size and display breakdown on exit")
+        ("null", "Run without writing to file")
+        ("continue", "Don't abort on a bad packet")
+        ("skip-lo", "Skip checking LO lock status")
+        ("int-n", "Tune USRP with integer-N tuning")
     ;
     // clang-format on
     po::variables_map vm;
@@ -254,7 +320,13 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
                   << "This application streams data from a single channel of a USRP "
                      "device to a file.\n"
                   << std::endl;
-        return ~0;
+        return EXIT_FAILURE;
+    }
+
+    // check if frequency was set (otherwise we exit)
+    if (vm.count("freq") == 0) {
+        std::cerr << "Error: Need to specify a center frequency" << std::endl;
+        return EXIT_FAILURE;
     }
 
     bool bw_summary = vm.count("progress") > 0;
@@ -278,10 +350,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         if (ref == "gpsdo") {
             try {
                 set_usrp_clock_gpsdo(usrp);
-                set_usrp_time_gpsdo(usrp, gps_timeout);
             } catch (const std::exception &e) {
                 std::cerr << e.what() << std::endl;
-                return ~0;
+                return EXIT_FAILURE;
             }
         } else {
             usrp->set_clock_source(ref);
@@ -300,8 +371,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
     // set the sample rate
     if (rate <= 0.0) {
         std::cerr << "Please specify a valid sample rate" << std::endl;
-        return ~0;
+        return EXIT_FAILURE;
     }
+
     std::cout << boost::format("Setting RX Rate: %f Msps...") % (rate / 1e6) << std::endl;
     usrp->set_rx_rate(rate, channel);
     std::cout << boost::format("Actual RX Rate: %f Msps...") % (usrp->get_rx_rate(channel) / 1e6)
@@ -373,14 +445,49 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         }
     }
 
+    // check filename and format if we want timestamp we'll have json
+    use_binary = vm.count("use-binary") > 0;
+    const auto time = std::time(nullptr);
+    std::asctime(std::localtime(&time));
+    if (file == "") {
+        if (use_binary)
+            file = str(boost::format("measurement_%i.raw") % time);
+        else
+            file = str(boost::format("measurement_%i.json") % time);
+    }
+
+    // before sampling we must set the usrp time to the gps time
+    // we have to do it after setting all usrp parameters
+    // otherwise we loose time sync
+    try {
+        set_usrp_time_gpsdo(usrp, gps_timeout);
+    } catch (const std::exception &e) {
+        std::cerr << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+
     if (total_num_samps == 0) {
         std::signal(SIGINT, &sig_int_handler);
         std::cout << "Press Ctrl + C to stop streaming..." << std::endl;
     }
 
-#define recv_to_file_args(format)                                                                  \
-    (usrp, format, wirefmt, channel, file, spb, total_num_samps, total_time, bw_summary, stats,    \
-     null, enable_size_map, continue_on_bad_packet)
+    // clang-format off
+#define recv_to_file_args(format) (usrp,                   \
+                                   format,                 \
+                                   wirefmt,                \
+                                   channel,                \
+                                   file,                   \
+                                   spb,                    \
+                                   total_num_samps,        \
+                                   use_binary,             \
+                                   total_time,             \
+                                   bw_summary,             \
+                                   stats,                  \
+                                   null,                   \
+                                   enable_size_map,        \
+                                   continue_on_bad_packet  )
+    // clang-format on
+
     // recv to file
     if (wirefmt == "s16") {
         if (type == "double")
