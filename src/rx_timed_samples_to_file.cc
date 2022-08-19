@@ -106,18 +106,31 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
     uint64_t last_update_samps = 0;
 
     // insert the metadata of rx stream
+    const auto time = std::time(nullptr);
+    std::asctime(std::localtime(&time));
+    const auto center_freq = usrp->get_rx_freq();
+    const auto gain = usrp->get_rx_gain();
+    const auto sample_freq = usrp->get_rx_rate();
     if (!use_binary || binfmt == "msgpack") {
-        const auto time = std::time(nullptr);
-        std::asctime(std::localtime(&time));
         data["start_time"] = time;
-        data["center_freq"] = usrp->get_rx_freq();
-        data["gain"] = usrp->get_rx_gain();
-        data["bandwidth"] = usrp->get_rx_rate();
+        data["center_freq"] = center_freq;
+        data["gain"] = gain;
+        data["bandwidth"] = sample_freq;
+    } else {
+        if (outfile.is_open()) {
+            outfile.write((const char *)&time, sizeof(long));
+            outfile.write((const char *)&center_freq, sizeof(double));
+            outfile.write((const char *)&gain, sizeof(double));
+            outfile.write((const char *)&sample_freq, sizeof(double));
+        }
     }
 
     // Run this loop until either time expired (if a duration was given), until
     // the requested number of samples were collected (if such a number was
     // given), or until Ctrl-C was pressed.
+    std::cout << "Sampling process will start now." << std::endl;
+    uint64_t seconds;
+    double nanoseconds;
     while (not stop_signal_called and
            (num_requested_samples != num_total_samps or num_requested_samples == 0) and
            (time_requested == 0.0 or std::chrono::steady_clock::now() <= stop_time)) {
@@ -166,13 +179,18 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
 
         if (outfile.is_open()) {
             if (use_binary and binfmt == "raw") {
+                seconds = md.time_spec.get_full_secs();
+                nanoseconds = md.time_spec.get_frac_secs();
+                outfile.write((const char *)&num_rx_samps, sizeof(size_t));
+                outfile.write((const char *)&seconds, sizeof(int64_t));
+                outfile.write((const char *)&nanoseconds, sizeof(double));
                 outfile.write((const char *)&buff.front(), num_rx_samps * sizeof(samp_type));
             } else {
-                // create our object
-                rx_samps_buff.emplace_back(num_rx_samps);
-                full_sec_buff.emplace_back(md.time_spec.get_full_secs());
-                frac_sec_buff.emplace_back(md.time_spec.get_frac_secs());
-                buffs.emplace_back(buff);
+            // create our object
+            rx_samps_buff.emplace_back(num_rx_samps);
+            full_sec_buff.emplace_back(md.time_spec.get_full_secs());
+            frac_sec_buff.emplace_back(md.time_spec.get_frac_secs());
+            buffs.emplace_back(buff);
             }
         }
 
