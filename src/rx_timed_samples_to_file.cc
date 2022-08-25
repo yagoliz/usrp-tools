@@ -502,11 +502,13 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
     // before sampling we must set the usrp time to the gps time
     // we have to do it after setting all usrp parameters
     // otherwise we loose time sync
-    try {
-        set_usrp_time_gpsdo(usrp, gps_timeout);
-    } catch (const std::exception &e) {
-        std::cerr << e.what() << std::endl;
-        return EXIT_FAILURE;
+    if (ref == "gpsdo") {
+        try {
+            set_usrp_time_gpsdo(usrp, gps_timeout);
+        } catch (const std::exception &e) {
+            std::cerr << e.what() << std::endl;
+            return EXIT_FAILURE;
+        }
     }
 
     if (total_num_samps == 0) {
