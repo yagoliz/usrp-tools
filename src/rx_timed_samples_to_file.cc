@@ -44,6 +44,7 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
                   uint64_t num_requested_samples,
                   bool use_binary,
                   const std::string &binfmt,
+                  bool direct_write,
                   double time_requested = 0.0, 
                   bool bw_summary = false, 
                   bool stats = false,
@@ -118,7 +119,7 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
         data["bandwidth"] = sample_freq;
     } else {
         if (outfile.is_open()) {
-            outfile.write((const char *)&time, sizeof(long));
+            outfile.write((const char *)&time, sizeof(size_t));
             outfile.write((const char *)&center_freq, sizeof(double));
             outfile.write((const char *)&gain, sizeof(double));
             outfile.write((const char *)&sample_freq, sizeof(double));
@@ -178,19 +179,19 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
         num_total_samps += num_rx_samps;
 
         if (outfile.is_open()) {
-            if (use_binary and binfmt == "raw") {
+            if (use_binary and direct_write and binfmt == "raw") {
                 seconds = md.time_spec.get_full_secs();
                 nanoseconds = md.time_spec.get_frac_secs();
-                outfile.write((const char *)&num_rx_samps, sizeof(size_t));
-                outfile.write((const char *)&seconds, sizeof(int64_t));
+                outfile.write((const char *)&seconds, sizeof(uint64_t));
                 outfile.write((const char *)&nanoseconds, sizeof(double));
+                outfile.write((const char *)&num_rx_samps, sizeof(size_t));
                 outfile.write((const char *)&buff.front(), num_rx_samps * sizeof(samp_type));
             } else {
-            // create our object
-            rx_samps_buff.emplace_back(num_rx_samps);
-            full_sec_buff.emplace_back(md.time_spec.get_full_secs());
-            frac_sec_buff.emplace_back(md.time_spec.get_frac_secs());
-            buffs.emplace_back(buff);
+                // create our object
+                rx_samps_buff.emplace_back(num_rx_samps);
+                full_sec_buff.emplace_back(md.time_spec.get_full_secs());
+                frac_sec_buff.emplace_back(md.time_spec.get_frac_secs());
+                buffs.emplace_back(buff);
             }
         }
 
@@ -212,13 +213,23 @@ void recv_to_file(uhd::usrp::multi_usrp::sptr usrp,
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
     rx_stream->issue_stream_cmd(stream_cmd);
 
+    // saving our precious data
     std::cout << boost::format("Stream finished. Saving data to %s...") % file << std::endl;
     if (outfile.is_open()) {
         if (use_binary and binfmt == "raw") {
+            if (!direct_write) {
+                // write binary vector
+                for (unsigned int i = 0; i < rx_samps_buff.size(); i++) {
+                    outfile.write((const char *)&full_sec_buff[i], sizeof(int64_t));
+                    outfile.write((const char *)&frac_sec_buff[i], sizeof(double));
+                    outfile.write((const char *)&rx_samps_buff[i], sizeof(size_t));
+                    outfile.write((const char *)&buffs[i].front(), rx_samps_buff[i] * sizeof(samp_type));
+                }
+            }
             outfile.close();
         } else {
             // emplace all data on our json stream
-            for (int i = 0; i < rx_samps_buff.size(); i++) {
+            for (unsigned int i = 0; i < rx_samps_buff.size(); i++) {
                 json chunk;
                 chunk["seconds"] = full_sec_buff[i];
                 chunk["nanoseconds"] = frac_sec_buff[i];
@@ -305,7 +316,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
     std::string args, file, file_ts, type, ant, subdev, ref, wirefmt, binfmt;
     size_t channel, total_num_samps, spb, gps_timeout;
     double rate, freq, gain, bw, total_time, setup_time, lo_offset;
-    bool use_binary;
+    bool use_binary, direct_write;
 
     // setup the program options
     po::options_description desc("Allowed options");
@@ -333,6 +344,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         ("timeout-gps", po::value<size_t>(&gps_timeout)->default_value(300), "Timeout to wait for GPSDO lock")
         ("use-binary", "Save data in binary format")
         ("binary-format", po::value<std::string>(&binfmt)->default_value("msgpack"), "Which format to save to (msgpack, raw IQ)")
+        ("direct-write", "Whether to write to file on the loop or wait until samplibng is finished")
         ("progress", "Periodically display short-term bandwidth")
         ("stats", "Show average bandwidth on exit")
         ("sizemap", "Track packet size and display breakdown on exit")
@@ -478,6 +490,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         }
     }
 
+    // check if the direct write is enabled
+    direct_write = vm.count("direct-write") > 0;
+
     // check filename and format if we want timestamp we'll have json
     use_binary = vm.count("use-binary") > 0;
     const auto time = std::time(nullptr);
@@ -526,6 +541,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
                                    total_num_samps,        \
                                    use_binary,             \
                                    binfmt,                 \
+                                   direct_write,           \
                                    total_time,             \
                                    bw_summary,             \
                                    stats,                  \
