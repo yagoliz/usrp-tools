@@ -15,7 +15,7 @@ The `src` directory contains the following executables:
 You'll need to install the `udh` and `boost-program-options` libraries. Also you will need `meson` and a compiler toolchain. For example on **Debian/Ubuntu** based systems these should be achieved with:
 
 ```bash
-sudo apt install meson build-essential libboost-dev libboost-program-options-dev libuhd-dev nlohmann-json3-dev
+sudo apt install meson build-essential libboost-dev libboost-program-options-dev libuhd-dev nlohmann-json3-dev python3-uhd
 ```
 
 ### Compiling
