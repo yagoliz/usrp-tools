@@ -10,6 +10,7 @@
 
 #include <boost/format.hpp>
 #include <boost/program_options.hpp>
+#include <boost/system/error_code.hpp>
 #include <uhd/usrp/multi_usrp.hpp>
 #include <uhd/utils/safe_main.hpp>
 #include <uhd/utils/thread.hpp>
