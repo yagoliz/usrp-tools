@@ -68,7 +68,7 @@ def converter(filename, ofilename, otype="mat"):
         nsec = np.fromfile(filename, dtype=np.float64, count=1, offset=offset + bytes64)
         nsamp = np.fromfile(
             filename, dtype=np.uint64, count=1, offset=offset + 2 * bytes64
-        )
+        )[0]
 
         # flat array with the i/q samples of the chunk
         samps_flat = np.fromfile(
