@@ -64,8 +64,8 @@ def converter(filename, ofilename, otype="mat"):
     i = 0
     while offset < file_size:
         # subheaders of the chunk
-        sec = np.fromfile(filename, dtype=np.uint64, count=1, offset=offset)
-        nsec = np.fromfile(filename, dtype=np.float64, count=1, offset=offset + bytes64)
+        sec = np.fromfile(filename, dtype=np.uint64, count=1, offset=offset)[0]
+        nsec = np.fromfile(filename, dtype=np.float64, count=1, offset=offset + bytes64)[0]
         nsamp = np.fromfile(
             filename, dtype=np.uint64, count=1, offset=offset + 2 * bytes64
         )[0]
