@@ -1,4 +1,4 @@
-project('usrp-tools', 'cpp', version: '0.0', default_options : ['c_std=c11', 'cpp_std=c++11'])
+project('usrp-tools', 'cpp', version: '0.0', default_options : ['c_std=c11', 'cpp_std=c++17'])
 
 # Boost and UHD libraries
 boost_dep = dependency('boost', modules : ['system','program_options'])
